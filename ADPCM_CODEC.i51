@@ -1,0 +1,917 @@
+
+
+;[ Декодер и фильтр (звук) информация
+
+;-----------------------------------------------------------;
+;                 Декодер сжатого звука:		    ;
+;-----------------------------------------------------------;
+;							    ;
+;  <───────────256*n─байт─блок───────────────>		    ;
+; ┌───┬───┬───┬───┬──────────────────────────┐		    ;
+; │  Xnom │ N │ 0 │    252+255*(n-1) байт    │		    ;
+; └───┴───┴───┴───┴──────────────────────────┘ 		    ;
+;							    ;
+;  Xnom - начальная точка				    ;
+;  N    - номер отсчета в таблице приращений		    ;
+;  0    - лишний байт :)				    ;
+;  252+255*(n-1) байта инф:				    ;
+;	кажый из этих байт имеет вид:			    ;
+;							    ;
+; 2 Bit/sempl:						    ;
+; 							    ;
+;   7   6   5   4   3   2   1   0			    ;
+; ┌───┬───┬───┬───┬───┬───┬───┬───┐    			    ;
+; │ S │ M │ S │ M │ S │ M │ S │ M │ - поступающий байт      ;
+; └───┴───┴───┴───┴───┴───┴───┴───┘      		    ;
+;							    ;
+;	M - поступающий 0-ой бит			    ;
+;	S - поступающий 1-ый бит ( Знак )		    ;
+;							    ;
+;							    ;
+; 4 Bit/sempl:						    ;
+; 							    ;
+;   7    6    5    4   3    2    1   0			    ;
+; ┌───┬────┬────┬────┬───┬────┬────┬────┐    		    ;
+; │ S │ M3 │ M2 │ M1 │ S │ M3 │ M2 │ M1 │- поступающий байт ;
+; └───┴────┴────┴────┴───┴────┴────┴────┘      		    ;
+;							    ;
+;	M1 - поступающий 0-ой бит			    ;
+;	M2 - поступающий 1-ый бит			    ;
+;	M3 - поступающий 2-ой бит			    ;
+;	S  - поступающий 3-ий бит ( Знак )		    ;
+;							    ;
+;   n - зависит от частоты звучания			    ;
+;   n = cтаршему байту количества семплов до коррекции	    ;
+;							    ;
+;-----------------------------------------------------------;
+;							    ;
+;       R2 - Номер значения в таблице приращений	    ;
+;	     к текущей величине сигнала			    ;
+;							    ;
+; 2 Bit/sempl:						    ;
+;							    ;
+;  Cама величина приращений расчитывается:		    ;
+;							    ;
+;  T:=SAUND_TAB_INF[R2]*M+SAUND_TAB_INF[R2]/2		    ;
+;							    ;
+;		      ┌ 1, R2:=R2+2			    ;
+;   Поступающий M бит ┤					    ;
+;		      └ 0, R2:=R2-1			    ;
+;        				где: 0 <= R2 <= 88  ;
+; 4 Bit/sempl:						    ;
+;							    ;
+;  Cама величина приращений расчитывается:		    ;
+;							    ;
+;  T:=SAUND_TAB_INF[R2]*M3+				    ;
+;    +SAUND_TAB_INF[R2]/2*M2+				    ;
+;    +SAUND_TAB_INF[R2]/4*M1+				    ;
+;    +SAUND_TAB_INF[R2]/8				    ;
+;							    ;
+;   Поступающие M3 M2 M1      R2			    ;
+;		 					    ;
+;		 0  0  0      -1			    ;
+;		 0  0  1      -1			    ;
+;		 0  1  0      -1			    ;
+;		 0  1  1      -1			    ;
+;		 1  0  0      +2			    ;
+;		 1  0  1      +4			    ;
+;		 1  1  0      +6			    ;
+;		 1  1  1      +8			    ;
+;		 					    ;
+;        				где: 0 <= R2 <= 88  ;
+;  * после коррекции R2 = N				    ;
+;       R1 - Номер следующего значения таблицы		    ;
+;	     линий задержек, для записи			    ;
+;	     сформированного величины сигнала		    ;
+;							    ;
+;    R3#R4 - собственно величиа сигнала			    ;
+;							    ;
+;			 ┌ 1, R3#R4:=R3#R4 - T		    ;
+;   Поступающий S бит    ┤				    ;
+;			 └ 0, R3#R4:=R3#R4 + T		    ;
+;							    ;
+;  ** после коррекции R3#R4 = Xnom			    ;
+;							    ;
+;       R5 - (0..16), отвечает за последовательность	    ;
+;	   действий в прерывании			    ;
+;							    ;
+;      R5  │    	 действие			    ;
+;   ┌ 0000<┘  проверка нужна ли керрекция		    ;
+;   │ ^^^^    считываем новый байт			    ;
+;   │         выделение первых 2-х битов		    ;
+;   │         расчет,фильтрация, ЦАП = Y фильтра	    ;
+;   │ 1111						    ;
+;   └>1110 ┐    фильтрация того же расчета, ЦАП = Y фильтра ;
+;   ┌ 1101<┘    фильтрация того же расчета, ЦАП = Y фильтра ;
+;   └>1100 ┐─┐! выделение вторых (следующих) 2-х битов	    ;
+;	^^ │ │  расчет,фильтрация, ЦАП = Y фильтра	    ;
+;     1011 │ │						    ;
+;   ┌ 1010<┘ │  фильтрация того же расчета, ЦАП = Y фильтра ;
+;   └>1001 ┐ │  фильтрация того же расчета, ЦАП = Y фильтра ;
+;   ┌ 1000<┘ │  выделение третьих (следующих) 2-х битов	    ;
+;   │   ^^   │  расчет,фильтрация, ЦАП = Y фильтра	    ;
+;   │ 0111   │						    ;
+;   └>0110 ┐ │  фильтрация того же расчета, ЦАП = Y фильтра ;
+;   ┌ 0101<┘ │  фильтрация того же расчета, ЦАП = Y фильтра ;
+;   └>0100 ┐<┘  выделение четвертых (следующих) 2-х битов   ;
+;	^^ │    расчет,фильтрация, ЦАП = Y фильтра	    ;
+;     0011 │						    ;
+;   ┌ 0010<┘    фильтрация того же расчета, ЦАП = Y фильтра ;
+;   └>0001 ┐    фильтрация того же расчета, ЦАП = Y фильтра ;
+;          │						    ;
+;							    ;
+;             !: 4 Bit/sempl				    ;
+;							    ;
+;-----------------------------------------------------------;
+;         		 Фильтр				    ;
+;-----------------------------------------------------------;
+;          						    ;
+;   Общий вид: 						    ;
+;          						    ;
+; R3#R4 ┌───┐   ┌───┐   ┌───┐       ┌────┐		    ;
+;     O─┤ 1 ├─┬─┤ 2 ├─┬─┤ 3 ├─ --- ─┤ 29 ├──┐		    ;
+;       └───┘ │ └───┘ │ └───┘  │││  └────┘  │	            ;
+;	      │       │        │││          │		    ;
+;             │       │        │││          │		    ;
+;							    ;
+;            k1      k2	     k3..k28       k29		    ;
+;							    ;
+;	      │       │        │││          │		    ;
+;           ┌─┴───────┴────────┴┴┴──────────┴─┐ 	    ;
+;	    │		   SUM		      │		    ;
+;	    └───────────────┬─────────────────┘		    ;
+;			    │			     Y	    ;
+;			    └────────────────────────O	    ;
+;							    ;
+;-----------------------------------------------------------;
+;							    ;
+; ПРОЦЕДУРА BO ВРЕМЯ РАБОТЫ ИСПОЛЬЗУЕТ R0..R5 3-го БАНКА    ;
+;							    ;
+;-----------------------------------------------------------;
+
+
+
+
+
+;]
+
+;[ Константы
+
+
+	SOUND_TCON	EQU	41H
+
+	SOUND_ADRES	EQU	42H { 43H 44H 45H }
+
+	SOUND_DATA_SIZE	EQU	46H { 47H 48H 49H }
+
+	SOUND_BLOK_SEML	EQU	4AH { 4BH 4CH 4DH }
+
+	SOUND_BYTE_IN	EQU	4EH
+
+	SOUND_BIT	EQU	SOUND_BYTE_IN+1
+
+
+;[   ; коэфициенты фильтра  (при Fс=0.125) 6000 Гц
+
+{	FILTR_K01	EQU 10000H - 0000000000000010B {-0.000091147}
+	FILTR_K02	EQU 10000H - 0000000000001001B {-0.000290069}
+	FILTR_K03	EQU	     0000000000000000B
+	FILTR_K04	EQU	     0000000000110011B { 0.001576654}
+	FILTR_K05	EQU	     0000000010000111B { 0.004137029}
+	FILTR_K06	EQU	     0000000010100100B { 0.005019806}
+	FILTR_K07	EQU	     0000000000000000B
+	FILTR_K08	EQU 10000H - 0000000110011111B {-0.012666078}
+	FILTR_K09	EQU 10000H - 0000001101110101B {-0.027038521}
+	FILTR_K10	EQU 10000H - 0000001110100001B {-0.028353120}
+	FILTR_K11	EQU	     0000000000000000B
+	FILTR_K12	EQU	     0000100000100111B { 0.063699249}
+	FILTR_K13	EQU	     0001001011110010B { 0.148026618}
+	FILTR_K14	EQU	     0001110001001010B { 0.221009743}
+	FILTR_K15	EQU	     0001111111111110B { 0.249939669}
+}
+
+; № 2:
+	FILTR_K01	EQU 10000H - 0000000000000010B	;-0.000071557928
+	FILTR_K02	EQU 10000H - 0000000000000111B	;-0.000227727629
+	FILTR_K03	EQU	     0000000000000000B
+	FILTR_K04	EQU	     0000000000101000B	; 0.001237799961
+	FILTR_K05	EQU	     0000000001101010B	; 0.003247898926
+	FILTR_K06	EQU	     0000000010000001B	; 0.003940948639
+	FILTR_K07	EQU	     0000000000000000B
+	FILTR_K08	EQU 10000H - 0000000101000101B	;-0.009943883582
+	FILTR_K09	EQU 10000H - 0000001010110111B	;-0.021227398674
+	FILTR_K10	EQU 10000H - 0000001011011001B	;-0.022259463901
+	FILTR_K11	EQU	     0000000000000000B
+	FILTR_K12	EQU	     0000011001100110B	; 0.050008998253
+	FILTR_K13	EQU	     0000111011100000B	; 0.116212718850
+	FILTR_K14	EQU	     0001011000110101B	; 0.173510301695
+	FILTR_K15	EQU	     0001100100011101B	; 0.196222603926
+
+
+
+;]
+
+{
+;[   ; коэфициенты фильтра  (при Fс=0.083) 4000 Гц
+
+	FILTR_K01	EQU          0000000000000010B { 0,000061035}
+	FILTR_K02	EQU          0000000000000111B { 0,000213623}
+	FILTR_K03	EQU	     0000000000000000B
+	FILTR_K04	EQU 10000H - 0000000000100101B {-0,001129150}
+	FILTR_K05	EQU 10000H - 0000000001110110B {-0,003601074}
+	FILTR_K06	EQU 10000H - 0000000011101001B {-0,007110596}
+	FILTR_K07	EQU 10000H - 0000000101001000B {-0,010009766}
+	FILTR_K08	EQU 10000H - 0000000100100110B {-0,008972168}
+	FILTR_K09	EQU          0000000000000000B
+	FILTR_K10	EQU          0000001010010010B { 0,020080566}
+	FILTR_K11	EQU	     0000011010011000B { 0,051513672}
+	FILTR_K12	EQU	     0000101110001110B { 0,090270996}
+	FILTR_K13	EQU	     0001000001110010B { 0,128479004}
+	FILTR_K14	EQU	     0001010000001100B { 0,156616211}
+	FILTR_K15	EQU	     0001010101100000B { 0,166992188}
+
+;]
+}
+{
+;[   ; коэфициенты фильтра  (при Fс=0.042) 2000 Гц
+
+	FILTR_K01	EQU 10000H - 0000000000000010B {-0,000061035}
+	FILTR_K02	EQU 10000H - 0000000000000100B {-0,000122070}
+	FILTR_K03	EQU	     0000000000000000B
+	FILTR_K04	EQU	     0000000000010111B { 0,000701904}
+	FILTR_K05	EQU	     0000000001010010B { 0,002502441}
+	FILTR_K06	EQU	     0000000011000111B { 0,006072998}
+	FILTR_K07	EQU	     0000000110001100B { 0,012084961}
+	FILTR_K08	EQU 	     0000001010110000B { 0,020996094}
+	FILTR_K09	EQU 	     0000010000110011B { 0,032806396}
+	FILTR_K10	EQU 	     0000011000000011B { 0,046966553}
+	FILTR_K11	EQU	     0000011111111011B { 0,062347412}
+	FILTR_K12	EQU	     0000100111100100B { 0,077270508}
+	FILTR_K13	EQU	     0000101101111110B { 0,089782715}
+	FILTR_K14	EQU	     0000110010001111B { 0,098114014}
+	FILTR_K15	EQU	     0000110011101111B { 0,101043701}
+;]
+}
+;]
+
+START_ADPCM:
+;[
+; ЗАГРУЗИТЬ В DPTR АДРЕС НАЧАЛА WAV ФАЙЛА
+;	MOV	DPTR,#ABSADDR(KEY_BIP)
+
+	MOV	PAGE,#0
+	MOV	RP2,#SG_SOUND
+	PUSH	TCON
+	CLR	TR0
+	CLR	TR2
+
+	MOV	R0,#4FH
+	CLR	A
+	MOVX	@R0,A		; Обнуление переменных
+	DJNZ	R0,%-1		; и таблицы задержек
+
+	POP	A
+	MX0I	#SOUND_TCON,A
+
+	CALL	SAVE0_DPTR
+
+
+;---------------------------------------;
+; 	считывание заголовка файла	;
+;---------------------------------------;
+
+;[	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; "RIFF"
+
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; Размер файла
+
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; "WAVE"
+
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; "fmt "
+
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; Размер чанка
+;	CALL	GETCH_BYTE	; в нашем случае 14Н
+
+;	CALL	GETCH_BYTE	; Формат: 11H
+;	CALL	GETCH_BYTE	; IMA ADPCM
+
+;	CALL	GETCH_BYTE	; Каналы (1)/2
+;	CALL	GETCH_BYTE	;     (моно)/стерио
+
+;	CALL	GETCH_BYTE	; Частота дискретизации
+;	CALL	GETCH_BYTE	; (число семплов в сек)
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; Среднее число
+;	CALL	GETCH_BYTE	; байт в сек
+
+;	CALL	GETCH_BYTE	; Выравнивание
+;]	CALL	GETCH_BYTE	; данных в DATA
+
+	MOV	R5,#34
+	CALL	GETCH_BYTE
+	DJNZ	R5,%-1
+
+	CALL	GETCH_BYTE	; кол-во бит
+	MX0	#SOUND_BIT,A
+
+;	CALL	GETCH_BYTE	; на семпл
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; Н Е  З Н А Ю
+
+	MOV	R5,#3
+	CALL	GETCH_BYTE
+	DJNZ	R5,%-1
+
+	CALL	GETCH_BYTE	; кол-во семплов
+	CALL	GETCH_BYTE	; до коррекции
+	CLR	C
+	RRC	A
+	CLR	C
+	RRC	A
+	MOV	R0,#SOUND_BLOK_SEML+1
+	MOVXD	@R0,A
+	MOVX	@R0,#252
+
+;[	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; "fact"
+
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; Размер чанка
+;	CALL	GETCH_BYTE	; в нашем случае 4Н
+
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	; Общее
+;	CALL	GETCH_BYTE	; кол-во семплов
+
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;	CALL	GETCH_BYTE	;
+;]	CALL	GETCH_BYTE	; "data"
+
+	MOV	R5,#16
+	CALL	GETCH_BYTE
+	DJNZ	R5,%-1
+
+	MOV	R1,#SOUND_DATA_SIZE
+	CALL	GETCH_BYTE	;
+	MOVXI	@R1,A
+	CALL	GETCH_BYTE	; Общее кол-во
+	MOVXI	@R1,A
+	CALL	GETCH_BYTE	; байт в data
+	MOVXI	@R1,A
+	CALL	GETCH_BYTE	;
+	MOVX	@R1,A
+
+;---------------------------------------;
+; 	   КОНЕЦ заголовка файла	;
+;---------------------------------------;
+
+	MOV	R35,#0
+	MOV	R31,#3DH
+	MOV	TMR2L,#0FFH-3EH
+	MOV	RCAP2L,#0FFH-03EH
+	MOV	TMR2H,#0FFH
+	MOV	RCAP2H,#0FFH
+	SETB	BIT_ADPCM
+	SETB	TR2
+	RET
+;]
+
+ADPCM_INT:
+;[
+
+	PUSH	EIE2
+	PUSH	IE
+	mov	EIE2,#0
+	mov	IE,#10000000B
+;Разрешить int1?
+	ACALL	ADPCM_INTR
+
+PUSH	PAGE
+MOV	PAGE,#00
+	PUSH	PSWA
+	PUSH	RP2
+
+	MOV	RP2,#SG_SOUND	; Переключение сегмента и банка памяти
+	MOV	PSW,#00011000B	;BANK3
+
+	MOV	A,R5		; Если не надо считывать
+	JNZ	SOUND_DECODING	; новый байт, то перейти
+
+	MOV	R0,#SOUND_BLOK_SEML+2
+	DECX	@R0
+	CJNE	A,#0FFH,SOUND_NEW_BYTE
+	INC	R0
+	DECX	@R0		; Количество байт до коррекции - 1
+	CJNE	A,#0FFH,SOUND_NEW_BYTE	; Если коррекция не нужна, то перейти
+	MX0	R5,#SOUND_BLOK_SEML	; --== КОРРЕКЦИЯ ==--
+	INC	R0
+	MOVXI	A,@R0
+	INC	R0
+	MOVXD	@R0,A			; Обновляем кол-во байт
+	MOVX	@R0,R5			; дo коррекции
+
+	CALL	GETCH_BYTE		; Считываем текущую
+	MOV	R3,A
+	CALL	GETCH_BYTE		; (.) сигнала
+	MOV	R4,A
+	CALL	GETCH_BYTE		; Считываем табличное
+	MOV	R2,A			; смещение
+	CALL	GETCH_BYTE		; Считываем 0
+
+	MOV	R5,#3			; считанную точку показать 3 раза
+
+	MX0	A,#SOUND_DATA_SIZE
+	SUB	A,#4
+	MOVX	@R0,A
+	JNC	SOUND_DECODING
+					; Уменшение длинны данных
+	SJMP	SOUND_MINUS_BYTE	; на 4 байта
+
+ADPCM_INTR:
+	RETI
+
+
+SOUND_NEW_BYTE:
+	CALL	GETCH_BYTE		; Считываем байт
+	MX0	#SOUND_BYTE_IN,A
+
+	MOV	R5,#16
+
+	MX0	A,#SOUND_DATA_SIZE	; Уменшение длинны данных на 1
+	DEC	A
+
+	MOVX	@R0,A		{1}
+	CJNE	A,#0FFH,SOUND_DECODING
+SOUND_MINUS_BYTE:
+	INC	R0
+	DECX	@R0		{2 до 16 секунд(16 кГц)}
+	CJNE	A,#0FFH,SOUND_DECODING
+	INC	R0
+	DECX	@R0		{3 до 23 минут (48 кГц)}
+	CJNE	A,#0FFH,SOUND_DECODING
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	Данные закончились! ЗАПРЕТИТЬ ПРЕРЫВАНИЕ
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	CLR	TR2
+	CLR	BIT_ADPCM
+	MX0	A,#SOUND_TCON
+	MOV	TCON,A
+	JMP	ADPCM_Q
+
+SOUND_DECODING:
+	MOV	SFRPAGE,#3
+
+	MOV	A,R5
+	ANL	A,#3		; Повышение дискретизации в 3 раза
+	LJNZ	SOUND_FILTR
+
+	MOV	MAC0CF, #00001000B   {....СБРОС.ЦЕЛЫЕ НАКОПЛЕНИЕ}
+
+	MOV	A,R2		; счиываем приращение из таблицы
+	ADD	A,#4
+	MOVC	A,@A+PC
+	MOV	MAC0AL,A
+	SJMP	SOUND_L_BYTE	  ;МЛАДШИЕ
+DB 007H,008H,009H,00AH,00BH,00CH,00DH,00EH
+DB 010H,011H,013H,015H,017H,019H,01CH,01FH
+DB 022H,025H,029H,02DH,032H,037H,03CH,042H
+DB 049H,050H,058H,061H,06BH,076H,082H,08FH
+DB 09DH,0ADH,0BEH,0D1H,0E6H,0FDH,017H,033H
+DB 051H,073H,098H,0C1H,0EEH,020H,056H,092H
+DB 0D4H,01CH,06CH,0C3H,024H,08EH,002H,083H
+DB 010H,0ABH,056H,012H,0E0H,0C3H,0BDH,0D0H
+DB 0FFH,04CH,0BAH,04CH,007H,0EEH,006H,054H
+DB 0DCH,0A5H,0B6H,015H,0CAH,0DFH,05BH,04BH
+DB 0B9H,0B2H,044H,07EH,071H,02FH,0CEH,062H
+DB 0FFH
+SOUND_L_BYTE:
+	MOV	A,R2
+	ADD	A,#4
+	MOVC	A,@A+PC
+	MOV	MAC0AH,A
+	SJMP	SOUND_H_BYTE	  ;СТАРШИЕ
+DB 000H,000H,000H,000H,000H,000H,000H,000H
+DB 000H,000H,000H,000H,000H,000H,000H,000H
+DB 000H,000H,000H,000H,000H,000H,000H,000H
+DB 000H,000H,000H,000H,000H,000H,000H,000H
+DB 000H,000H,000H,000H,000H,000H,001H,001H
+DB 001H,001H,001H,001H,001H,002H,002H,002H
+DB 002H,003H,003H,003H,004H,004H,005H,005H
+DB 006H,006H,007H,008H,008H,009H,00AH,00BH
+DB 00CH,00EH,00FH,011H,013H,014H,017H,019H
+DB 01BH,01EH,021H,025H,028H,02CH,031H,036H
+DB 03BH,041H,048H,04FH,057H,060H,069H,074H
+DB 07FH
+SOUND_H_BYTE:
+
+	MX0D	A,#SOUND_BIT
+	LCJNE	A,#2,SOUND_4_BIT; ПЕРЕХОД , ЕСЛИ 4-БИТ НА СЕМПЛ
+				; ИНАЧЕ СЧИТАЕМ  2-БИТ НА СЕМПЛ
+	MOVX	A,@R0
+	RRC	A
+
+	MOV	MAC0BH#MAC0BL,#4000H; T=T/2
+
+{12}	JC	%3		; Если K0=1, ТО перейти
+	DEC	R2		; Tab_N --
+	SJMP	SOUND_SIGN
+
+	MOV	MAC0BL,#0		;
+{1}	INC	R2
+{2}	INC	R2
+	MOV	MAC0BL,#0		; T=T+T/2
+
+SOUND_SIGN:
+{1}	RRC	A
+{2}	MOVX	@R0,A
+
+	MOV	MAC0CF, #00100000B {..СДВИГ ВЛЕВО ....}
+
+{12}	JC	SOUND_MINUS
+
+	MOV	A,MAC0ACC2	; R4#R3:=R4#R3+T
+	ADD	R3,A
+
+	MOV	A,MAC0ACC3
+	MOV	R0,A
+	ADDC	R4,A
+
+	MOV	A,PSW		; ПРОВЕРКА НА ПРЕДЕЛ R4#R3<=7FFF
+	SWAP	A
+	RL	A
+	XRL	A,R0
+	JNB	ACC.7,SOUND_N_KORR
+	MOV	R3,#0FFH
+	MOV	R4,#07FH
+	SJMP	SOUND_N_KORR
+SOUND_MINUS:
+	MOV	A,R3		; R4#R3:=R4#R3-T
+	SUB	A,MAC0ACC2
+	MOV	R3,A
+
+	MOV	R0,MAC0ACC3
+	MOV	A,R4
+	SUBB	A,R0
+	MOV	R4,A
+
+	MOV	A,PSW		; ПРОВЕРКА НА ПРЕДЕЛ R4#R3=>8000
+	SWAP	A
+	RL	A
+	XRL	A,R0
+	JNB	ACC.7,SOUND_N_KORR
+	MOV	R3,#000H
+	MOV	R4,#080H
+
+SOUND_N_KORR:
+	CJNE	R2,#0FFH,%2
+	CLR	R2		; N>=0 (ОТНИМАЕТСЯ ТОЛЬКО 1)
+	CJNE	R2,#89,%1
+	JC	%2
+	MOV	R2,#88		; N<=88
+	DEC	R5		; КОРРЕКЦИЯ ПО ЧАСТОТЕ
+
+SOUND_FILTR:
+	DEC	R5
+
+;	Преоброзование диопозона
+;	(-7FFF..7FFF) -> (0..FFFF)
+;	Преоброзование только для Цап
+;
+;******************************************
+;
+;	Результат: R4#R3
+;
+;******************************************
+;
+;	MOV	DAC0L,R3
+;	MOV	DAC0H,R4
+
+
+
+;[ ФИЛЬТР ОБЩИЙ ВИД
+
+	MOV	SFRPAGE,#3
+
+	MOV	R0,R31
+	MOV 	MAC0CF,#00001000B {....СБРОС.ЦЕЛЫЕ НАКОПЛЕНИЕ}
+
+{1}	MOV MAC0AH#MAC0AL,#FILTR_K01
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{2}	MOV MAC0AH#MAC0AL,#FILTR_K02
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{3}	MOV MAC0AH#MAC0AL,#FILTR_K03
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{4}	MOV MAC0AH#MAC0AL,#FILTR_K04
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{5}	MOV MAC0AH#MAC0AL,#FILTR_K05
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{6}	MOV MAC0AH#MAC0AL,#FILTR_K06
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{7}	MOV MAC0AH#MAC0AL,#FILTR_K07
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{8}	MOV MAC0AH#MAC0AL,#FILTR_K08
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{9}	MOV MAC0AH#MAC0AL,#FILTR_K09
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{10}	MOV MAC0AH#MAC0AL,#FILTR_K10
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{11}	MOV MAC0AH#MAC0AL,#FILTR_K11
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{12}	MOV MAC0AH#MAC0AL,#FILTR_K12
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{13}	MOV MAC0AH#MAC0AL,#FILTR_K13
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{14}	MOV MAC0AH#MAC0AL,#FILTR_K14
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{15}	MOV MAC0AH#MAC0AL,#FILTR_K15
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{16}	MOV MAC0AH#MAC0AL,#FILTR_K14
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{17}	MOV MAC0AH#MAC0AL,#FILTR_K13
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{18}	MOV MAC0AH#MAC0AL,#FILTR_K12
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{19}	MOV MAC0AH#MAC0AL,#FILTR_K11
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{20}	MOV MAC0AH#MAC0AL,#FILTR_K10
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{21}	MOV MAC0AH#MAC0AL,#FILTR_K09
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{22}	MOV MAC0AH#MAC0AL,#FILTR_K08
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{23}	MOV MAC0AH#MAC0AL,#FILTR_K07
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{24}	MOV MAC0AH#MAC0AL,#FILTR_K06
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{25}	MOV MAC0AH#MAC0AL,#FILTR_K05
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{26}	MOV MAC0AH#MAC0AL,#FILTR_K04
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{27}	MOV MAC0AH#MAC0AL,#FILTR_K03
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{28}	MOV MAC0AH#MAC0AL,#FILTR_K02
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+	DEC	R0
+	ANL	R30,#00111111B
+{29}	MOV MAC0AH#MAC0AL,#FILTR_K01
+	MOVXD	A,@R0
+	MOV MAC0BH,A
+	MOVX	A,@R0
+	MOV MAC0BL,A
+
+	INC	R1
+	ANL	R31,#00111111B
+
+	MOV MAC0CF, #00100000B {..СДВИГ ВЛЕВО ....}
+
+	MOVX	@R1,R3
+	IMOVX	@R1,R4
+
+
+	MOV	A,MAC0ACC2
+	ADD	A,#0FFH
+	MOV	R0,A
+	MOV	A,MAC0ACC3
+	ADDC	A,#07FH
+;]
+
+;*************************************************************
+;
+; Результат:  MAC0ACC3 : MAC0ACC2
+;
+;*************************************************************
+
+	MOV	PAGE,#0
+	MOV	DAC0L,R0
+	MOV	DAC0H,A
+
+ADPCM_Q:
+	POP	RP2
+	POP	PSWA
+
+	POP	PAGE
+	POP	IE
+	POP	EIE2
+	RET
+
+
+
+SOUND_4_BIT:
+
+	MOVX	A,@R0
+	ANL	A,#7
+	ADD	A,#2
+	MOVC	A,@A+PC
+	SJMP	SOUND_MEM
+	DB	-1,-1,-1,-1,2,4,6,8
+SOUND_MEM:
+	ADD	R2,A
+	MOVX	A,@R0
+
+	MOV MAC0BH,#10H
+	MOV MAC0BL,#0
+{1}	RRC	A
+{23}	JNC	%3
+	MOV MAC0BH,#20H
+	MOV MAC0BL,#0
+
+{12}	CJNE	R5,#12,%2
+{3}	MOV	R5,#4
+
+	MOV MAC0BH,#40H
+
+	RRC	A
+	JNC	%2
+	MOV MAC0BL,#0
+{1}	RRC	A
+{23}	JNC	%5
+	MOV MAC0BL,#0
+{1}	NOP
+{2}	NOP
+	MOV MAC0BL,#0
+
+
+{12}
+	JMP	SOUND_SIGN
+
+;]
+
+
+GETCH_BYTE:
+
+;[
+	MOV	R0,#SOUND_ADRES
+	PUSH	DPTR
+	CALL	LOAD0_DPTR
+	CALL	RD_ROMHI
+	PUSH	A
+	MOV	R0,#SOUND_ADRES
+	CALL	SAVE0_DPTR
+	POP	A
+	POP	DPTR
+	RET
+;]
